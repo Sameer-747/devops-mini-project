@@ -1,0 +1,65 @@
+---
+# Deploys the Maven-built jar and verifies it is healthy.
+#   ansible-playbook -i inventory.ini deploy.yml --limit local -e build_number=12
+- name: Deploy DevOps Task Manager
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Check that the jar built by Maven exists
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ jar_source }}"
+      register: jar_file
+
+    - name: Stop if the jar is missing
+      ansible.builtin.assert:
+        that: jar_file.stat.exists
+        fail_msg: "{{ jar_source }} not found. Run 'mvn package' first."
+
+    - name: Install Java 17 (Ubuntu/Debian servers)
+      become: true
+      ansible.builtin.apt:
+        name: openjdk-17-jre-headless
+        state: present
+        update_cache: true
+      when: install_java | bool and ansible_facts['os_family'] == 'Debian'
+
+    - name: Create application directories
+      become: "{{ use_systemd | bool }}"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user | default(omit) }}"
+        mode: "0755"
+      loop:
+        - "{{ app_base_dir }}"
+        - "{{ app_base_dir }}/releases"
+        - "{{ app_base_dir }}/logs"
+
+    - name: Copy the new release
+      become: "{{ use_systemd | bool }}"
+      ansible.builtin.copy:
+        src: "{{ jar_source }}"
+        dest: "{{ app_base_dir }}/releases/{{ app_name }}-{{ build_number }}.jar"
+        owner: "{{ app_user | default(omit) }}"
+        mode: "0644"
+
+    - name: Switch to the new release, restart and verify
+      ansible.builtin.import_tasks: tasks/switch_and_restart.yml
+
+    # ---------- Keep only the latest releases ----------
+    - name: Find old releases
+      ansible.builtin.find:
+        paths: "{{ app_base_dir }}/releases"
+        patterns: "{{ app_name }}-*.jar"
+      register: releases
+
+    - name: Remove releases beyond the newest {{ keep_releases }}
+      become: "{{ use_systemd | bool }}"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ (releases.files | sort(attribute='mtime', reverse=true))[keep_releases | int:] }}"
+      loop_control:
+        label: "{{ item.path | basename }}"

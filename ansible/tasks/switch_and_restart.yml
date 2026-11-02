@@ -1,0 +1,80 @@
+---
+# Shared by deploy.yml and rollback.yml: point current.jar at a release, restart, verify.
+- name: Point current.jar at the new release
+  become: "{{ use_systemd | bool }}"
+  ansible.builtin.file:
+    src: "{{ app_base_dir }}/releases/{{ app_name }}-{{ build_number }}.jar"
+    dest: "{{ app_base_dir }}/current.jar"
+    state: link
+    force: true
+
+# ---------- Linux server: run as a systemd service ----------
+- name: Install systemd service
+  become: true
+  ansible.builtin.template:
+    src: taskmanager.service.j2
+    dest: /etc/systemd/system/{{ app_name }}.service
+    mode: "0644"
+  when: use_systemd | bool
+
+- name: Restart service
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ app_name }}"
+    state: restarted
+    enabled: true
+    daemon_reload: true
+  when: use_systemd | bool
+
+# ---------- Laptop / no systemd: run in the background ----------
+- name: Stop the previous instance
+  ansible.builtin.shell: |
+    if [ -f app.pid ] && kill -0 "$(cat app.pid)" 2>/dev/null; then
+      kill "$(cat app.pid)"
+      for i in $(seq 1 20); do kill -0 "$(cat app.pid)" 2>/dev/null || break; sleep 1; done
+      echo stopped
+    fi
+    rm -f app.pid
+  args:
+    chdir: "{{ app_base_dir }}"
+  register: stop_result
+  changed_when: "'stopped' in stop_result.stdout"
+  when: not (use_systemd | bool)
+
+- name: Start the new instance
+  ansible.builtin.shell: |
+    nohup java -Xms128m -Xmx256m -jar current.jar >> logs/app.log 2>&1 &
+    echo $! > app.pid
+  args:
+    chdir: "{{ app_base_dir }}"
+  environment:
+    PORT: "{{ app_port }}"
+    APP_ENV: "{{ app_env }}"
+    BUILD_NUMBER: "{{ build_number }}"
+    JENKINS_NODE_COOKIE: dontKillMe
+    BUILD_ID: dontKillMe
+  when: not (use_systemd | bool)
+
+# ---------- Verify ----------
+- name: Wait for the port to open
+  ansible.builtin.wait_for:
+    port: "{{ app_port }}"
+    timeout: 90
+
+- name: Health check
+  ansible.builtin.uri:
+    url: "http://localhost:{{ app_port }}/actuator/health"
+    return_content: true
+  register: health
+  until: health.status == 200 and 'UP' in health.content
+  retries: 15
+  delay: 3
+
+- name: Read deployed build info
+  ansible.builtin.uri:
+    url: "http://localhost:{{ app_port }}/api/info"
+  register: info
+
+- name: Show result
+  ansible.builtin.debug:
+    msg: "Deployed {{ info.json.app }} v{{ info.json.version }} build #{{ info.json.build }} to {{ inventory_hostname }} on port {{ app_port }}"

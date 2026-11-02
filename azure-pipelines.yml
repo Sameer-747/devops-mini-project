@@ -1,0 +1,112 @@
+# Azure Pipelines: Build & Test with Maven -> publish artifact -> deploy to an Azure VM with Ansible.
+# Pipeline variables to create (Pipelines > Edit > Variables):
+#   VM_HOST  - public IP of your Ubuntu VM
+#   VM_USER  - SSH user on the VM (e.g. azureuser)
+# Secure file to upload (Pipelines > Library > Secure files): azure_vm_key  (the VM's private SSH key)
+# Environment to create (Pipelines > Environments): production  (add an approval check if you want a manual gate)
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  MAVEN_CACHE_FOLDER: $(Pipeline.Workspace)/.m2/repository
+  MAVEN_OPTS: '-Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)'
+
+stages:
+  - stage: Build_Test
+    displayName: Build & Test
+    pool:
+      vmImage: ubuntu-latest
+    jobs:
+      - job: Maven
+        displayName: Maven build, tests, coverage
+        steps:
+          - task: Cache@2
+            displayName: Cache Maven packages
+            inputs:
+              key: 'maven | "$(Agent.OS)" | pom.xml'
+              restoreKeys: |
+                maven | "$(Agent.OS)"
+              path: $(MAVEN_CACHE_FOLDER)
+
+          - task: Maven@4
+            displayName: mvn verify (unit + integration tests + coverage gate)
+            inputs:
+              mavenPomFile: pom.xml
+              goals: clean verify
+              options: '-B -Dbuild.number=$(Build.BuildId)'
+              mavenOptions: $(MAVEN_OPTS)
+              javaHomeOption: JDKVersion
+              jdkVersionOption: '1.17'
+              publishJUnitResults: true
+              testResultsFiles: '**/target/surefire-reports/TEST-*.xml,**/target/failsafe-reports/TEST-*.xml'
+
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish JaCoCo coverage
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: target/site/jacoco/jacoco.xml
+
+          - task: CopyFiles@2
+            displayName: Collect deployable files
+            inputs:
+              Contents: |
+                target/taskmanager.jar
+                ansible/**
+              TargetFolder: $(Build.ArtifactStagingDirectory)
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish artifact
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)
+              artifact: drop
+
+  - stage: Deploy
+    displayName: Deploy to Azure VM (Ansible)
+    dependsOn: Build_Test
+    # Deploy only from main, never from pull requests
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    pool:
+      vmImage: ubuntu-latest
+    jobs:
+      - deployment: DeployVM
+        displayName: Ansible deploy
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadSecureFile@1
+                  name: sshKey
+                  displayName: Download SSH key
+                  inputs:
+                    secureFile: azure_vm_key
+
+                - script: |
+                    chmod 600 "$(sshKey.secureFilePath)"
+                    python3 -m pip install --user ansible-core
+                  displayName: Install Ansible
+
+                - script: |
+                    cd "$(Pipeline.Workspace)/drop/ansible"
+                    ~/.local/bin/ansible-playbook -i inventory.ini deploy.yml \
+                      --limit azure \
+                      -e ansible_host=$(VM_HOST) \
+                      -e ansible_user=$(VM_USER) \
+                      -e ansible_ssh_private_key_file=$(sshKey.secureFilePath) \
+                      -e app_user=$(VM_USER) \
+                      -e build_number=$(Build.BuildId) \
+                      -e jar_source=$(Pipeline.Workspace)/drop/target/taskmanager.jar
+                  displayName: Run Ansible playbook
+
+                - script: |
+                    curl -fsS --retry 5 --retry-delay 5 http://$(VM_HOST):8080/actuator/health
+                    curl -fsS http://$(VM_HOST):8080/api/info
+                  displayName: Smoke test

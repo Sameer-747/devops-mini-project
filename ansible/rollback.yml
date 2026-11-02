@@ -1,0 +1,22 @@
+---
+# Roll back to an earlier build kept in releases/:
+#   ansible-playbook -i inventory.ini rollback.yml --limit local -e rollback_build=11
+- name: Roll back DevOps Task Manager
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Check the requested release exists
+      ansible.builtin.stat:
+        path: "{{ app_base_dir }}/releases/{{ app_name }}-{{ rollback_build }}.jar"
+      register: old_release
+
+    - name: Stop if it does not
+      ansible.builtin.assert:
+        that: old_release.stat.exists
+        fail_msg: "Release {{ rollback_build }} not found in {{ app_base_dir }}/releases"
+
+    - name: Redeploy that release
+      ansible.builtin.import_tasks: tasks/switch_and_restart.yml
+      vars:
+        build_number: "{{ rollback_build }}"

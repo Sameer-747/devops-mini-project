@@ -1,0 +1,17 @@
+app_name: taskmanager
+app_port: 8085
+app_env: "{{ group_names | first | default('local') }}"
+build_number: manual
+
+# Path to the jar built by Maven (on the machine running Ansible)
+jar_source: "{{ playbook_dir }}/../target/taskmanager.jar"
+
+# Where the app lives on the target
+app_base_dir: "{{ ansible_facts['env']['HOME'] }}/apps/{{ app_name }}"
+
+# How many old releases to keep for rollback
+keep_releases: 3
+
+# systemd is used when the target has it (Linux servers); otherwise the jar is run with nohup (macOS laptop)
+use_systemd: false
+install_java: false

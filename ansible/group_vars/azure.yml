@@ -1,0 +1,5 @@
+app_base_dir: /opt/taskmanager
+app_user: azureuser
+use_systemd: true
+install_java: true
+app_port: 8080

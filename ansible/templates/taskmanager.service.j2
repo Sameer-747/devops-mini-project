@@ -1,0 +1,19 @@
+[Unit]
+Description=DevOps Task Manager (build {{ build_number }})
+After=network.target
+
+[Service]
+User={{ app_user }}
+WorkingDirectory={{ app_base_dir }}
+Environment=PORT={{ app_port }}
+Environment=APP_ENV={{ app_env }}
+Environment=BUILD_NUMBER={{ build_number }}
+ExecStart=/usr/bin/java -Xms128m -Xmx256m -jar {{ app_base_dir }}/current.jar
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{{ app_base_dir }}/logs/app.log
+StandardError=append:{{ app_base_dir }}/logs/app.log
+
+[Install]
+WantedBy=multi-user.target
